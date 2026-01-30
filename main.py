@@ -1,112 +1,74 @@
 import os
-import re
-import json
 import sqlite3
-from typing import Optional
-
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from telegram import Update
-from telegram.constants import ChatType, ParseMode
 from telegram.ext import (
-    Application, ContextTypes, CommandHandler, MessageHandler, filters
+    Application, CommandHandler, MessageHandler,
+    ContextTypes, filters
 )
 
-# Optional AI (OpenAI)
-try:
-    from openai import OpenAI
-except Exception:
-    OpenAI = None
+# ================== ENV ==================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL")  # private channel ID like -100xxxx
 
-# ========== ENV ==========
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "").strip()   # e.g. @YourChannel
-OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
-
-OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
-OPENAI_MODEL = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
-
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN missing. Set it in Render Environment Variables.")
-
-# Normalize channel id/name
-if REQUIRED_CHANNEL and not REQUIRED_CHANNEL.startswith("@") and not REQUIRED_CHANNEL.startswith("-100"):
-    REQUIRED_CHANNEL = "@" + REQUIRED_CHANNEL
-
-# ========== DB (SQLite) ==========
-DB_PATH = "bot.db"
-
-def db_init():
-    with sqlite3.connect(DB_PATH) as con:
-        cur = con.cursor()
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS memory (
-            user_id INTEGER NOT NULL,
-            k TEXT NOT NULL,
-            v TEXT NOT NULL,
-            updated_at INTEGER NOT NULL,
-            PRIMARY KEY(user_id, k)
-        )
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS group_settings (
-            chat_id INTEGER PRIMARY KEY,
-            mode TEXT NOT NULL  -- "mention" or "always"
-        )
-        """)
-        con.commit()
-
-def mem_set(user_id: int, k: str, v: str):
-    with sqlite3.connect(DB_PATH) as con:
-        cur = con.cursor()
-        cur.execute(
-            "INSERT INTO memory(user_id,k,v,updated_at) VALUES(?,?,?,strftime('%s','now')) "
-            "ON CONFLICT(user_id,k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at",
-            (user_id, k, v)
-        )
-        con.commit()
-
-def mem_get_all(user_id: int) -> dict:
-    with sqlite3.connect(DB_PATH) as con:
-        cur = con.cursor()
-        cur.execute("SELECT k,v FROM memory WHERE user_id=?", (user_id,))
-        rows = cur.fetchall()
-    return {k: v for k, v in rows}
-
-def mem_del(user_id: int, k: str) -> bool:
-    with sqlite3.connect(DB_PATH) as con:
-        cur = con.cursor()
-        cur.execute("DELETE FROM memory WHERE user_id=? AND k=?", (user_id, k))
-        con.commit()
-        return cur.rowcount > 0
-
-def group_get_mode(chat_id: int) -> str:
-    with sqlite3.connect(DB_PATH) as con:
-        cur = con.cursor()
-        cur.execute("SELECT mode FROM group_settings WHERE chat_id=?", (chat_id,))
-        row = cur.fetchone()
-    return row[0] if row else "mention"
-
-def group_set_mode(chat_id: int, mode: str):
-    with sqlite3.connect(DB_PATH) as con:
-        cur = con.cursor()
-        cur.execute(
-            "INSERT INTO group_settings(chat_id,mode) VALUES(?,?) "
-            "ON CONFLICT(chat_id) DO UPDATE SET mode=excluded.mode",
-            (chat_id, mode)
-        )
-        con.commit()
-
-db_init()
-
-# ========== APP (telegram) ==========
+# ================== APP ==================
+app = FastAPI()
 application = Application.builder().token(BOT_TOKEN).build()
 
-# ========== FASTAPI ==========
-app = FastAPI()
+# ================== DATABASE ==================
+conn = sqlite3.connect("memory.db", check_same_thread=False)
+cur = conn.cursor()
+cur.execute("""
+CREATE TABLE IF NOT EXISTS memory (
+    user_id INTEGER,
+    key TEXT,
+    value TEXT,
+    PRIMARY KEY(user_id, key)
+)
+""")
+conn.commit()
 
-# ========== HELPERS ==========
-def is_madara_call(text: str) -> bool:
-    if not text:
+# ================== JOIN CHECK ==================
+async def check_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not REQUIRED_CHANNEL:
+        return True
+
+    user = update.effective_user
+    try:
+        member = await context.bot.get_chat_member(REQUIRED_CHANNEL, user.id)
+        if member.status in ["member", "administrator", "creator"]:
+            return True
+    except:
+        pass
+
+    await update.message.reply_text("🚨 MUST JOIN OUR CHANNEL")
+    return False
+
+# ================== BOT HANDLERS ==================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_join(update, context):
+        return
+    await update.message.reply_text("🎉 WELCOME OUR BOT")
+
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_join(update, context):
+        return
+    await update.message.reply_text("😈 Madara says: " + update.message.text)
+
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+
+# ================== WEBHOOK ==================
+@app.post("/")
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return {"ok": True}
+
+@app.get("/")
+async def root():
+    return {"status": "alive"}    if not text:
         return False
     t = text.lower()
     return ("madara" in t) or ("@madara" in t)
